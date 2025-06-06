@@ -1,0 +1,74 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Environment config
+.env
+.python-version
+
+# Logs and runtime files
+*.log
+shinobi_monitor.log
+
+# Credentials and secrets
+shinobi-sheets-credentials.json
+
+# Output directory (auto-generated JSON reports)
+shinobi_output/
+!shinobi_output/.gitkeep
+
+# IDE/editor configs
+.vscode/
+.idea/
+*.swp
+*.bak
+
+# System-specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+
+# Jupyter notebooks checkpoints (if applicable in future)
+.ipynb_checkpoints/
+
+# Compiled C extensions (if used later)
+build/
+dist/
+*.egg
+
+# pytest cache (if testing is introduced)
+.pytest_cache/
+
+# Coverage reports (if coverage tracking is added)
+htmlcov/
+.coverage
+.tox/
+
+# Package manager files
+Pipfile.lock
+poetry.lock
+
+# Backup files
+*.bak
+*~
