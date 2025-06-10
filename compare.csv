@@ -1,0 +1,22 @@
+"Feature","Script 1","Script 2","Script 3"
+"Configuration Management","Basic","Advanced","Advanced"
+"Retry Logic for API","No","Yes","Yes"
+"Retry Logic for Google Sheets","No","Yes","Yes"
+"Structured Logging","No","Yes","Yes"
+"Log Retention/Rotation","No","No","Yes"
+"Consecutive Error Monitoring","No","No","Yes"
+"Sentry Integration","No","No","Yes"
+"Google Sheets Authentication Retry","No","No","Yes"
+"File Rotation for Metrics","No","No","Yes"
+"Jitter in Sleep Time","No","No","Yes"
+
+
+
+
+"Configuration","Purpose","Relevance to Production"
+"Log Retention/Rotation","Manage log files to prevent disk space issues","Prevents system failures, ensures compliance"
+"Consecutive Error Monitoring","Track and act on consecutive errors","Prevents resource waste, alerts for issues"
+"Sentry Integration","Real-time error tracking and monitoring","Enhances debugging, reduces downtime"
+"Google Sheets Authentication Retry","Recover from authentication failures","Ensures continuous operation, reduces manual intervention"
+"File Rotation for Metrics","Manage metric files to prevent disk exhaustion","Maintains system performance, manages storage"
+"Jitter in Sleep Time","Distribute load, prevent synchronized failures","Reduces peak load, enhances system stability"
