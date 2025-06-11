@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Shinobi Configuration
-SHINOBI_HOST = "192.168.1.15"
+SHINOBI_HOST = "10.10.10.10"
 SHINOBI_PORT = 8080
 API_KEY = os.getenv("SHINOBI_API_KEY", "UfUL1AcqYC9OkNDpj2jeESeAkaOPRj")
 GROUP_KEY = os.getenv("SHINOBI_GROUP_KEY", "bS1gixfvdu")
@@ -31,7 +31,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 class ShinobiAPI:
     def __init__(self):
         self.session = requests.Session()
-        self.session.timeout = 5
+        self.session.timeout = 10 
 
     def _make_request(self, endpoint):
         """Generic request handler."""

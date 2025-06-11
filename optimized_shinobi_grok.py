@@ -7,18 +7,15 @@ import logging
 import requests
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
 import gspread
-from gspread import Client, Worksheet  # Correct and concise
-from gspread.spreadsheet import Spreadsheet  # Only if directly needed
-
+from gspread import Client, Worksheet
 from oauth2client.service_account import ServiceAccountCredentials
 from pydantic import BaseModel, ValidationError
 from dotenv import load_dotenv
-import pytz  # If you're using timezones
+import pytz
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Check dependencies
 try:
@@ -29,7 +26,7 @@ try:
     import dotenv
     import pytz
 except ImportError as e:
-    print(f"Error: Missing required package: {e.name}. Install with 'pip install requests python-dotenv gspread oauth2client pydantic pytz'")
+    print(f"Error: Missing required package: {e.name}. Install with 'pip install requests python-dotenv gspread oauth2client pydantic pytz tenacity'")
     sys.exit(1)
 
 # Configuration model
@@ -68,7 +65,7 @@ class JsonFormatter(logging.Formatter):
 def setup_logging(timezone: str) -> logging.Logger:
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
-    logger.handlers.clear()  # Clear existing handlers to prevent duplicates
+    logger.handlers.clear()
     
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(JsonFormatter(timezone))
@@ -98,13 +95,15 @@ def load_config(env_path: str = ".env") -> Config:
         if shinobi_port is None:
             raise ValueError("Missing required environment variable: SHINOBI_PORT")
         
-        monitor_ids = os.getenv("MONITOR_IDS")
-        if monitor_ids is None:
+        monitor_ids_str = os.getenv("MONITOR_IDS")
+        if monitor_ids_str is None:
             raise ValueError("Missing required environment variable: MONITOR_IDS")
+        monitor_ids = [id.strip() for id in monitor_ids_str.split(",")]
         
-        scopes = os.getenv("SCOPES")
-        if scopes is None:
+        scopes_str = os.getenv("SCOPES")
+        if scopes_str is None:
             raise ValueError("Missing required environment variable: SCOPES")
+        scopes = [scope.strip() for scope in scopes_str.split(",")]
         
         update_interval = os.getenv("UPDATE_INTERVAL")
         if update_interval is None:
@@ -123,10 +122,10 @@ def load_config(env_path: str = ".env") -> Config:
             "shinobi_port": int(shinobi_port),
             "api_key": os.getenv("SHINOBI_API_KEY") or "",
             "group_key": os.getenv("SHINOBI_GROUP_KEY") or "",
-            "monitor_ids": json.loads(monitor_ids),
+            "monitor_ids": monitor_ids,
             "sheet_id": os.getenv("SHEET_ID") or "",
             "credentials_file": os.getenv("CREDENTIALS_FILE") or "",
-            "scopes": json.loads(scopes),
+            "scopes": scopes,
             "output_dir": os.getenv("OUTPUT_DIR") or "",
             "update_interval": float(update_interval),
             "max_retries": int(max_retries),
@@ -147,7 +146,7 @@ def load_config(env_path: str = ".env") -> Config:
 
         logger.info("Configuration loaded successfully")
         return Config(**env_config)
-    except (ValidationError, ValueError, json.JSONDecodeError) as e:
+    except (ValidationError, ValueError) as e:
         logger.error(f"Configuration error: {str(e)}")
         raise
 
@@ -170,35 +169,27 @@ class ShinobiAPI:
         session.mount("https://", adapter)
         return session
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     def get_all_monitors(self) -> Optional[List[Dict[str, Any]]]:
         endpoint = f"monitor/{self.config.group_key}"
-        for attempt in range(self.config.max_retries):
-            try:
-                resp = self.session.get(f"{self.base_url}/{endpoint}", timeout=10)
-                resp.raise_for_status()
-                data = resp.json()
-                if isinstance(data, dict) and not data.get("ok"):
-                    self.logger.error(f"API error: {data.get('msg', 'Unknown error')}")
-                    return None
-                return data
-            except requests.Timeout as e:
-                self.logger.warning(f"Timeout on attempt {attempt + 1}: {str(e)}")
-                if attempt < self.config.max_retries - 1:
-                    time.sleep(self.config.retry_backoff_factor * (2 ** attempt))
-                continue
-            except requests.RequestException as e:
-                self.logger.error(f"Request error: {str(e)}")
+        try:
+            resp = self.session.get(f"{self.base_url}/{endpoint}", timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, dict) and not data.get("ok"):
+                self.logger.error(f"API error: {data.get('msg', 'Unknown error')}")
                 return None
-        self.logger.error("Max retries reached for API request")
-        return None
-
+            return data
+        except requests.RequestException as e:
+            self.logger.error(f"Request error: {str(e)}")
+            return None
 
 class GoogleSheetsClient:
     def __init__(self, config: Config, logger: logging.Logger):
         self.config = config
         self.logger = logger
         self.client: Optional[Client] = None
-        self.sheet: Optional[Worksheet] = None  # Changed from Spreadsheet to Worksheet
+        self.sheet: Optional[Worksheet] = None
         self._initialize_client()
 
     def _initialize_client(self) -> None:
@@ -210,8 +201,7 @@ class GoogleSheetsClient:
             creds = ServiceAccountCredentials.from_json_keyfile_name(
                 self.config.credentials_file, self.config.scopes
             )
-            # Type assertion to satisfy type checker
-            self.client = gspread.authorize(creds)  # type: ignore[arg-type]
+            self.client = gspread.authorize(creds)
             self.sheet = self.client.open_by_key(self.config.sheet_id).sheet1
         except Exception as e:
             self.logger.error(f"Failed to initialize Google Sheets client: {str(e)}")
@@ -275,9 +265,11 @@ def process_monitors(monitors_data: Optional[List[Dict[str, Any]]], config: Conf
         percentage_recording = round((recording_count / total_cameras) * 100, 2)
     
     tz = pytz.timezone(config.timezone)
+    now_utc = datetime.now(pytz.utc)
+    now_local = now_utc.astimezone(tz)
     metrics = {
-        "date": datetime.now(tz).strftime("%Y-%m-%d"),
-        "time": datetime.now(tz).strftime("%H:%M:%S"),
+        "date": now_local.strftime("%Y-%m-%d"),
+        "time": now_local.strftime("%H:%M:%S"),
         "total_cameras": total_cameras,
         "recording": recording_count,
         "not_recording": total_cameras - recording_count,
@@ -291,7 +283,7 @@ def save_metrics(metrics: Dict[str, Any], config: Config, logger: logging.Logger
     try:
         os.makedirs(config.output_dir, exist_ok=True)
         timestamp = datetime.now(pytz.timezone(config.timezone)).strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.normpath(os.path.join(config.output_dir, f"monitor_statuses_{timestamp}.json"))
+        output_path = os.path.normpath(os.path.join(config.output_dir, f"monitor_data_{timestamp}.json"))
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
         return output_path
@@ -315,6 +307,9 @@ def print_metrics(data: Dict[str, Any]) -> None:
     if data["missing_monitors"]:
         print(f"\nWarning: Missing monitors: {data['missing_monitors']}")
 
+def health_check(api: ShinobiAPI) -> str:
+    return "OK" if api.get_all_monitors() is not None else "ERROR"
+
 def main() -> None:
     print("Starting Shinobi Monitor Script...")
     try:
@@ -326,7 +321,8 @@ def main() -> None:
 
     logger = setup_logging(config.timezone)
     logger.info("Shinobi Monitor Script started")
-    
+    logger.info(f"Configuration loaded: {config.dict(exclude={'api_key', 'credentials_file'})}")
+
     api = ShinobiAPI(config, logger)
     sheets_client = GoogleSheetsClient(config, logger)
     shutdown = False
@@ -343,23 +339,30 @@ def main() -> None:
         try:
             start_time = time.time()
             monitors_data = api.get_all_monitors()
+            if monitors_data is None:
+                logger.error("Failed to fetch monitor data from Shinobi API")
+                continue
             processed_data = process_monitors(monitors_data, config, logger)
             
             if processed_data["metrics"]:
                 save_metrics(processed_data, config, logger)
-                sheets_client.append_row([
+                if not sheets_client.append_row([
                     processed_data["metrics"]["date"],
                     processed_data["metrics"]["time"],
                     processed_data["metrics"]["total_cameras"],
                     processed_data["metrics"]["recording"],
                     processed_data["metrics"]["percentage_recording"],
                     processed_data["metrics"]["threshold_met"]
-                ])
+                ]):
+                    logger.error("Failed to append row to Google Sheets")
                 print_metrics(processed_data)
             
             elapsed_time = time.time() - start_time
             sleep_time = max(config.update_interval - elapsed_time, 0)
             time.sleep(sleep_time)
+        except requests.RequestException as e:
+            logger.error(f"Network error while fetching data: {str(e)}")
+            time.sleep(config.update_interval)
         except Exception as e:
             logger.error(f"Unexpected error in main loop: {str(e)}")
             time.sleep(config.update_interval)

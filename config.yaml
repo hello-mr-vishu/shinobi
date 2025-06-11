@@ -1,4 +1,4 @@
-shinobi_host: "192.168.1.15"
+shinobi_host: "10.10.10.10"
 shinobi_port: 8080
 api_key: "UfUL1AcqYC9OkNDpj2jeESeAkaOPRj"
 group_key: "bS1gixfvdu"

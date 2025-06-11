@@ -4,3 +4,5 @@ oauth2client
 pydantic
 PyYAML
 urllib3
+python-dotenv
+tenacity
