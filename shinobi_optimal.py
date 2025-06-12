@@ -44,6 +44,9 @@ class Config(BaseModel):
     max_retries: int
     retry_backoff_factor: float
     timezone: str
+    max_consecutive_failures: int
+    log_retention_days: int
+
 
 # Structured log formatter
 class JsonFormatter(logging.Formatter):
@@ -64,15 +67,19 @@ class JsonFormatter(logging.Formatter):
 # Initialize logger
 def setup_logging(timezone: str) -> logging.Logger:
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)  # Keep DEBUG for file logging
     logger.handlers.clear()
     
+    # Console handler: Only INFO and above
     console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)  # Restrict to INFO and above
     console_handler.setFormatter(JsonFormatter(timezone))
     logger.addHandler(console_handler)
     
+    # File handler: All levels (including DEBUG)
     try:
         file_handler = logging.FileHandler("shinobi_monitor.log")
+        file_handler.setLevel(logging.DEBUG)  # Allow all levels
         file_handler.setFormatter(JsonFormatter(timezone))
         logger.addHandler(file_handler)
     except Exception as e:
@@ -95,15 +102,13 @@ def load_config(env_path: str = ".env") -> Config:
         if shinobi_port is None:
             raise ValueError("Missing required environment variable: SHINOBI_PORT")
         
-        monitor_ids_str = os.getenv("MONITOR_IDS")
-        if monitor_ids_str is None:
+        monitor_ids = os.getenv("MONITOR_IDS")
+        if monitor_ids is None:
             raise ValueError("Missing required environment variable: MONITOR_IDS")
-        monitor_ids = [id.strip() for id in monitor_ids_str.split(",")]
         
-        scopes_str = os.getenv("SCOPES")
-        if scopes_str is None:
+        scopes = os.getenv("SCOPES")
+        if scopes is None:
             raise ValueError("Missing required environment variable: SCOPES")
-        scopes = [scope.strip() for scope in scopes_str.split(",")]
         
         update_interval = os.getenv("UPDATE_INTERVAL")
         if update_interval is None:
@@ -116,21 +121,26 @@ def load_config(env_path: str = ".env") -> Config:
         retry_backoff_factor = os.getenv("RETRY_BACKOFF_FACTOR")
         if retry_backoff_factor is None:
             raise ValueError("Missing required environment variable: RETRY_BACKOFF_FACTOR")
+        
+        max_consecutive_failures = os.getenv("MAX_CONSECUTIVE_FAILURES", "5")
+        log_retention_days = os.getenv("LOG_RETENTION_DAYS", "7")  # Default to 7 days
 
         env_config = {
             "shinobi_host": os.getenv("SHINOBI_HOST") or "",
             "shinobi_port": int(shinobi_port),
             "api_key": os.getenv("SHINOBI_API_KEY") or "",
             "group_key": os.getenv("SHINOBI_GROUP_KEY") or "",
-            "monitor_ids": monitor_ids,
+            "monitor_ids": json.loads(monitor_ids),
             "sheet_id": os.getenv("SHEET_ID") or "",
             "credentials_file": os.getenv("CREDENTIALS_FILE") or "",
-            "scopes": scopes,
+            "scopes": json.loads(scopes),
             "output_dir": os.getenv("OUTPUT_DIR") or "",
             "update_interval": float(update_interval),
             "max_retries": int(max_retries),
             "retry_backoff_factor": float(retry_backoff_factor),
-            "timezone": os.getenv("TIMEZONE", "Asia/Kolkata")
+            "timezone": os.getenv("TIMEZONE", "Asia/Kolkata"),
+            "max_consecutive_failures": int(max_consecutive_failures),
+            "log_retention_days": int(log_retention_days)  # Add to config
         }
         
         for key, value in env_config.items():
@@ -146,7 +156,7 @@ def load_config(env_path: str = ".env") -> Config:
 
         logger.info("Configuration loaded successfully")
         return Config(**env_config)
-    except (ValidationError, ValueError) as e:
+    except (ValidationError, ValueError, json.JSONDecodeError) as e:
         logger.error(f"Configuration error: {str(e)}")
         raise
 
@@ -184,6 +194,27 @@ class ShinobiAPI:
             self.logger.error(f"Request error: {str(e)}")
             return None
 
+    def health_check(self) -> str:
+        endpoint = f"monitor/{self.config.group_key}"
+        try:
+            resp = self.session.get(f"{self.base_url}/{endpoint}", timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, dict) and not data.get("ok"):
+                self.logger.warning(f"Shinobi server responded but with error: {data.get('msg', 'Unknown error')}")
+                return "INVALID_RESPONSE"
+            self.logger.debug("Shinobi server health check: OK")
+            return "OK"
+        except requests.ConnectionError:
+            self.logger.warning("Shinobi server is unreachable (connection error)")
+            return "UNREACHABLE"
+        except requests.Timeout:
+            self.logger.warning("Shinobi server health check timed out")
+            return "TIMEOUT"
+        except requests.RequestException as e:
+            self.logger.warning(f"Shinobi server health check failed: {str(e)}")
+            return "ERROR"
+
 class GoogleSheetsClient:
     def __init__(self, config: Config, logger: logging.Logger):
         self.config = config
@@ -192,6 +223,7 @@ class GoogleSheetsClient:
         self.sheet: Optional[Worksheet] = None
         self._initialize_client()
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     def _initialize_client(self) -> None:
         try:
             if not os.path.exists(self.config.credentials_file):
@@ -201,12 +233,13 @@ class GoogleSheetsClient:
             creds = ServiceAccountCredentials.from_json_keyfile_name(
                 self.config.credentials_file, self.config.scopes
             )
-            self.client = gspread.authorize(creds)
+            self.client = gspread.authorize(creds)  # type: ignore[arg-type]
             self.sheet = self.client.open_by_key(self.config.sheet_id).sheet1
         except Exception as e:
             self.logger.error(f"Failed to initialize Google Sheets client: {str(e)}")
             self.client = None
             self.sheet = None
+            raise
 
     def append_row(self, row: List[Any]) -> bool:
         if self.sheet is None:
@@ -214,7 +247,7 @@ class GoogleSheetsClient:
             return False
         for attempt in range(self.config.max_retries):
             try:
-                self.sheet.append_row(row)
+                self.sheet.append_row(row) # type: ignore[call-arg]
                 return True
             except Exception as e:
                 self.logger.warning(f"Failed to append row on attempt {attempt + 1}: {str(e)}")
@@ -227,10 +260,14 @@ def process_monitors(monitors_data: Optional[List[Dict[str, Any]]], config: Conf
         logger.error("Invalid or no monitor data received")
         return {"monitors": [], "metrics": {}}
 
+    logger.debug(f"Processing monitors: {monitors_data}")
+    logger.debug(f"Configured monitor IDs: {config.monitor_ids}")
+
     seen_ids = set()
     monitor_statuses = []
     for monitor in monitors_data:
         monitor_id = monitor.get("mid")
+        logger.debug(f"Checking monitor ID: {monitor_id}")
         if monitor_id in config.monitor_ids and monitor_id not in seen_ids:
             seen_ids.add(monitor_id)
             operational = monitor.get("mode") == "record" and monitor.get("status") == "Recording"
@@ -243,8 +280,10 @@ def process_monitors(monitors_data: Optional[List[Dict[str, Any]]], config: Conf
                 "status": monitor.get("status", "Unknown")
             }
             monitor_statuses.append(status)
+            logger.debug(f"Monitor status: {status}")
             if not operational:
-                logger.warning(json.dumps({
+                # Log to file only, not console
+                logger.debug(json.dumps({
                     "monitor_id": status["id"],
                     "name": status["name"],
                     "recording": status["recording"],
@@ -277,6 +316,7 @@ def process_monitors(monitors_data: Optional[List[Dict[str, Any]]], config: Conf
         "threshold_met": "Yes" if percentage_recording >= 75.0 else "No"
     }
 
+    logger.debug(f"Processed metrics: {metrics}")
     return {"monitors": monitor_statuses, "metrics": metrics, "missing_monitors": missing_monitors}
 
 def save_metrics(metrics: Dict[str, Any], config: Config, logger: logging.Logger) -> str:
@@ -286,6 +326,19 @@ def save_metrics(metrics: Dict[str, Any], config: Config, logger: logging.Logger
         output_path = os.path.normpath(os.path.join(config.output_dir, f"monitor_data_{timestamp}.json"))
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
+        
+        # Clean up old log files
+        cutoff_time = time.time() - (config.log_retention_days * 86400)  # Convert days to seconds
+        for filename in os.listdir(config.output_dir):
+            if filename.startswith("monitor_data_") and filename.endswith(".json"):
+                file_path = os.path.join(config.output_dir, filename)
+                if os.path.getmtime(file_path) < cutoff_time:
+                    try:
+                        os.remove(file_path)
+                        logger.debug(f"Deleted old log file: {file_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete old log file {file_path}: {str(e)}")
+        
         return output_path
     except Exception as e:
         logger.error(f"Failed to save metrics to {output_path}: {str(e)}")
@@ -307,9 +360,6 @@ def print_metrics(data: Dict[str, Any]) -> None:
     if data["missing_monitors"]:
         print(f"\nWarning: Missing monitors: {data['missing_monitors']}")
 
-def health_check(api: ShinobiAPI) -> str:
-    return "OK" if api.get_all_monitors() is not None else "ERROR"
-
 def main() -> None:
     print("Starting Shinobi Monitor Script...")
     try:
@@ -321,11 +371,12 @@ def main() -> None:
 
     logger = setup_logging(config.timezone)
     logger.info("Shinobi Monitor Script started")
-    logger.info(f"Configuration loaded: {config.dict(exclude={'api_key', 'credentials_file'})}")
+    logger.info(f"Configuration loaded: {config.model_dump(exclude={'api_key', 'credentials_file'})}")
 
     api = ShinobiAPI(config, logger)
     sheets_client = GoogleSheetsClient(config, logger)
     shutdown = False
+    consecutive_failures = 0
 
     def signal_handler(sig: int, frame: Optional[object]) -> None:
         nonlocal shutdown
@@ -338,10 +389,33 @@ def main() -> None:
     while not shutdown:
         try:
             start_time = time.time()
+            server_status = api.health_check()
+            print(f"Shinobi Server Status: {server_status}")
+            logger.info(f"Shinobi Server Status: {server_status}")
+
+            if server_status != "OK":
+                consecutive_failures += 1
+                logger.warning(f"Shinobi server check failed (attempt {consecutive_failures}/{config.max_consecutive_failures})")
+                if consecutive_failures >= config.max_consecutive_failures:
+                    logger.error(f"Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting script.")
+                    print(f"Error: Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting.")
+                    sys.exit(1)
+                time.sleep(config.update_interval)
+                continue
+
+            consecutive_failures = 0
+
             monitors_data = api.get_all_monitors()
             if monitors_data is None:
                 logger.error("Failed to fetch monitor data from Shinobi API")
+                consecutive_failures += 1
+                if consecutive_failures >= config.max_consecutive_failures:
+                    logger.error(f"Shinobi server data fetch failed after {config.max_consecutive_failures} attempts. Exiting script.")
+                    print(f"Error: Shinobi server data fetch failed after {config.max_consecutive_failures} attempts. Exiting.")
+                    sys.exit(1)
+                time.sleep(config.update_interval)
                 continue
+
             processed_data = process_monitors(monitors_data, config, logger)
             
             if processed_data["metrics"]:
@@ -362,6 +436,11 @@ def main() -> None:
             time.sleep(sleep_time)
         except requests.RequestException as e:
             logger.error(f"Network error while fetching data: {str(e)}")
+            consecutive_failures += 1
+            if consecutive_failures >= config.max_consecutive_failures:
+                logger.error(f"Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting script.")
+                print(f"Error: Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting.")
+                sys.exit(1)
             time.sleep(config.update_interval)
         except Exception as e:
             logger.error(f"Unexpected error in main loop: {str(e)}")
