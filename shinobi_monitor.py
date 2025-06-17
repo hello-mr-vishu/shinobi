@@ -224,14 +224,14 @@ class GoogleSheetsClient:
             return False
         for attempt in range(self.config.max_retries):
             try:
-                self.sheet.append_row(row)
+                self.sheet.append_row(row) # type: ignore[union-attr]
                 return True
             except Exception as e:
                 self.logger.warning(f"Failed to append row on attempt {attempt + 1}: {str(e)}")
                 time.sleep(self.config.retry_backoff_factor * (2 ** attempt))
         self.logger.error("Max retries reached for appending to Google Sheet")
         return False
-
+        
 def process_monitors(monitors_data: Optional[List[Dict[str, Any]]], config: Config, logger: logging.Logger) -> Dict[str, Any]:
     if not monitors_data or not isinstance(monitors_data, list):
         logger.error("Invalid or no monitor data received")

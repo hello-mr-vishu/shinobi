@@ -15,6 +15,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from pydantic import BaseModel, ValidationError
 from dotenv import load_dotenv
 import pytz
+from logging.handlers import RotatingFileHandler  # Added for log rotation
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Check dependencies
@@ -46,7 +47,8 @@ class Config(BaseModel):
     timezone: str
     max_consecutive_failures: int
     log_retention_days: int
-
+    apps_script_url: str  # Added for notification
+    notification_cooldown: int  # Added for notification
 
 # Structured log formatter
 class JsonFormatter(logging.Formatter):
@@ -67,19 +69,23 @@ class JsonFormatter(logging.Formatter):
 # Initialize logger
 def setup_logging(timezone: str) -> logging.Logger:
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)  # Keep DEBUG for file logging
+    logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
     
     # Console handler: Only INFO and above
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)  # Restrict to INFO and above
+    console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(JsonFormatter(timezone))
     logger.addHandler(console_handler)
     
-    # File handler: All levels (including DEBUG)
+    # File handler: Rotate logs, max 5 MB, keep 5 backups
     try:
-        file_handler = logging.FileHandler("shinobi_monitor.log")
-        file_handler.setLevel(logging.DEBUG)  # Allow all levels
+        file_handler = RotatingFileHandler(
+            "shinobi_monitor.log",
+            maxBytes=5*1024*1024,  # 5 MB
+            backupCount=5
+        )
+        file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(JsonFormatter(timezone))
         logger.addHandler(file_handler)
     except Exception as e:
@@ -123,7 +129,9 @@ def load_config(env_path: str = ".env") -> Config:
             raise ValueError("Missing required environment variable: RETRY_BACKOFF_FACTOR")
         
         max_consecutive_failures = os.getenv("MAX_CONSECUTIVE_FAILURES", "5")
-        log_retention_days = os.getenv("LOG_RETENTION_DAYS", "7")  # Default to 7 days
+        log_retention_days = os.getenv("LOG_RETENTION_DAYS", "7")
+        apps_script_url = os.getenv("APPS_SCRIPT_URL", "")  # Added, allow empty
+        notification_cooldown = os.getenv("NOTIFICATION_COOLDOWN", "3600")  # Added, default 1 hour
 
         env_config = {
             "shinobi_host": os.getenv("SHINOBI_HOST") or "",
@@ -140,11 +148,13 @@ def load_config(env_path: str = ".env") -> Config:
             "retry_backoff_factor": float(retry_backoff_factor),
             "timezone": os.getenv("TIMEZONE", "Asia/Kolkata"),
             "max_consecutive_failures": int(max_consecutive_failures),
-            "log_retention_days": int(log_retention_days)  # Add to config
+            "log_retention_days": int(log_retention_days),
+            "apps_script_url": apps_script_url,  # Added
+            "notification_cooldown": int(notification_cooldown)  # Added
         }
         
         for key, value in env_config.items():
-            if isinstance(value, str) and not value:
+            if isinstance(value, str) and not value and key not in ["apps_script_url"]:
                 logger.error(f"Missing required environment variable: {key.upper()}")
                 raise ValueError(f"Missing required environment variable: {key.upper()}")
 
@@ -159,6 +169,22 @@ def load_config(env_path: str = ".env") -> Config:
     except (ValidationError, ValueError, json.JSONDecodeError) as e:
         logger.error(f"Configuration error: {str(e)}")
         raise
+
+# Added: Function to trigger Apps Script
+def trigger_apps_script(config: Config, logger: logging.Logger, message: str) -> bool:
+    if not config.apps_script_url:
+        logger.warning("Apps Script URL not configured; skipping notification")
+        return False
+    
+    try:
+        payload = {"message": message}
+        response = requests.post(config.apps_script_url, json=payload, timeout=10)
+        response.raise_for_status()
+        logger.info(f"Successfully triggered Apps Script: {response.text}")
+        return True
+    except requests.RequestException as e:
+        logger.error(f"Failed to trigger Apps Script: {str(e)}")
+        return False
 
 class ShinobiAPI:
     def __init__(self, config: Config, logger: logging.Logger):
@@ -351,7 +377,7 @@ def print_metrics(data: Dict[str, Any]) -> None:
     print(f"  Time: {metrics['time']}")
     print(f"  Total Cameras: {metrics['total_cameras']}")
     print(f"  Recording: {metrics['recording']}")
-    print(f"  Not Recording: {metrics['not_recording']}")
+    print(f"  Not Recording: {metrics['not_recording']}")  # Fixed syntax error
     print(f"  Percentage Recording: {metrics['percentage_recording']}%")
     print(f"  Threshold Met: {metrics['threshold_met']}")
     print("\nMonitor Statuses:")
@@ -377,6 +403,8 @@ def main() -> None:
     sheets_client = GoogleSheetsClient(config, logger)
     shutdown = False
     consecutive_failures = 0
+    last_notification_time = 0.0  # Added for notification
+    server_was_up = True  # Added for notification
 
     def signal_handler(sig: int, frame: Optional[object]) -> None:
         nonlocal shutdown
@@ -393,25 +421,37 @@ def main() -> None:
             print(f"Shinobi Server Status: {server_status}")
             logger.info(f"Shinobi Server Status: {server_status}")
 
+            current_time = time.time()  # Added for notification
             if server_status != "OK":
                 consecutive_failures += 1
+                # Send notification on first failure or after cooldown
+                if server_was_up or (current_time - last_notification_time) >= config.notification_cooldown:
+                    message = f"Shinobi server at {config.shinobi_host}:{config.shinobi_port} is down (Status: {server_status}). Please check the server."
+                    if trigger_apps_script(config, logger, message):
+                        last_notification_time = current_time
+                    server_was_up = False
                 logger.warning(f"Shinobi server check failed (attempt {consecutive_failures}/{config.max_consecutive_failures})")
                 if consecutive_failures >= config.max_consecutive_failures:
-                    logger.error(f"Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting script.")
-                    print(f"Error: Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting.")
+                    error_msg = f"Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting script."
+                    logger.error(error_msg)
+                    print(f"Error: {error_msg}")
+                    trigger_apps_script(config, logger, error_msg)  # Added notification
                     sys.exit(1)
                 time.sleep(config.update_interval)
                 continue
 
             consecutive_failures = 0
+            server_was_up = True  # Added for notification
 
             monitors_data = api.get_all_monitors()
             if monitors_data is None:
                 logger.error("Failed to fetch monitor data from Shinobi API")
                 consecutive_failures += 1
                 if consecutive_failures >= config.max_consecutive_failures:
-                    logger.error(f"Shinobi server data fetch failed after {config.max_consecutive_failures} attempts. Exiting script.")
-                    print(f"Error: Shinobi server data fetch failed after {config.max_consecutive_failures} attempts. Exiting.")
+                    error_msg = f"Shinobi server data fetch failed after {config.max_consecutive_failures} attempts. Exiting script."
+                    logger.error(error_msg)
+                    print(f"Error: {error_msg}")
+                    trigger_apps_script(config, logger, error_msg)  # Added notification
                     sys.exit(1)
                 time.sleep(config.update_interval)
                 continue
@@ -437,9 +477,17 @@ def main() -> None:
         except requests.RequestException as e:
             logger.error(f"Network error while fetching data: {str(e)}")
             consecutive_failures += 1
+            current_time = time.time()  # Added for notification
+            if server_was_up or (current_time - last_notification_time) >= config.notification_cooldown:
+                message = f"Shinobi server at {config.shinobi_host}:{config.shinobi_port} is down (Network error: {str(e)}). Please check the server."
+                if trigger_apps_script(config, logger, message):
+                    last_notification_time = current_time
+                server_was_up = False
             if consecutive_failures >= config.max_consecutive_failures:
-                logger.error(f"Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting script.")
-                print(f"Error: Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting.")
+                error_msg = f"Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting script."
+                logger.error(error_msg)
+                print(f"Error: {error_msg}")
+                trigger_apps_script(config, logger, error_msg)  # Added notification
                 sys.exit(1)
             time.sleep(config.update_interval)
         except Exception as e:
