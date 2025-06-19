@@ -17,8 +17,8 @@ from dotenv import load_dotenv
 import pytz
 from logging.handlers import RotatingFileHandler  # Added for log rotation
 from tenacity import retry, stop_after_attempt, wait_exponential
+from typing import Optional  
 
-# Check dependencies
 try:
     import requests
     import gspread
@@ -386,6 +386,8 @@ def print_metrics(data: Dict[str, Any]) -> None:
     if data["missing_monitors"]:
         print(f"\nWarning: Missing monitors: {data['missing_monitors']}")
 
+
+
 def main() -> None:
     print("Starting Shinobi Monitor Script...")
     try:
@@ -403,8 +405,10 @@ def main() -> None:
     sheets_client = GoogleSheetsClient(config, logger)
     shutdown = False
     consecutive_failures = 0
-    last_notification_time = 0.0  # Added for notification
-    server_was_up = True  # Added for notification
+    last_notification_time = 0.0
+    server_was_up = True
+    last_status_check = 0.0
+    pending_notification: Optional[str] = None  # Added type annotation
 
     def signal_handler(sig: int, frame: Optional[object]) -> None:
         nonlocal shutdown
@@ -414,34 +418,59 @@ def main() -> None:
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    initial_status = api.health_check()
+    print(f"Initial Shinobi Server Status: {initial_status}")
+    logger.info(f"Initial Shinobi Server Status: {initial_status}")
+    if initial_status != "OK":
+        error_msg = f"Shinobi server at {config.shinobi_host}:{config.shinobi_port} is not running (Status: {initial_status}). Exiting script."
+        logger.error(error_msg)
+        print(f"Error: {error_msg}")
+        trigger_apps_script(config, logger, error_msg)
+        sys.exit(1)
+
     while not shutdown:
         try:
             start_time = time.time()
-            server_status = api.health_check()
-            print(f"Shinobi Server Status: {server_status}")
-            logger.info(f"Shinobi Server Status: {server_status}")
+            current_time = time.time()
 
-            current_time = time.time()  # Added for notification
-            if server_status != "OK":
-                consecutive_failures += 1
-                # Send notification on first failure or after cooldown
-                if server_was_up or (current_time - last_notification_time) >= config.notification_cooldown:
-                    message = f"Shinobi server at {config.shinobi_host}:{config.shinobi_port} is down (Status: {server_status}). Please check the server."
-                    if trigger_apps_script(config, logger, message):
-                        last_notification_time = current_time
-                    server_was_up = False
-                logger.warning(f"Shinobi server check failed (attempt {consecutive_failures}/{config.max_consecutive_failures})")
-                if consecutive_failures >= config.max_consecutive_failures:
-                    error_msg = f"Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting script."
-                    logger.error(error_msg)
-                    print(f"Error: {error_msg}")
-                    trigger_apps_script(config, logger, error_msg)  # Added notification
-                    sys.exit(1)
-                time.sleep(config.update_interval)
-                continue
+            if current_time - last_status_check >= 600:
+                server_status = api.health_check()
+                print(f"Shinobi Server Status: {server_status}")
+                logger.info(f"Shinobi Server Status: {server_status}")
+                last_status_check = current_time
 
-            consecutive_failures = 0
-            server_was_up = True  # Added for notification
+                if server_status != "OK":
+                    consecutive_failures += 1
+                    if server_was_up or (current_time - last_notification_time) >= config.notification_cooldown:
+                        message = f"Shinobi server at {config.shinobi_host}:{config.shinobi_port} is down (Status: {server_status}). Please check the server."
+                        if trigger_apps_script(config, logger, message):
+                            last_notification_time = current_time
+                            pending_notification = None  # Clear pending notification
+                        else:
+                            pending_notification = message  # Store message for retry
+                        server_was_up = False
+                    logger.warning(f"Shinobi server check failed (attempt {consecutive_failures}/{config.max_consecutive_failures})")
+                    if consecutive_failures >= config.max_consecutive_failures:
+                        error_msg = f"Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting script."
+                        logger.error(error_msg)
+                        print(f"Error: {error_msg}")
+                        trigger_apps_script(config, logger, error_msg)
+                        sys.exit(1)
+                    time.sleep(config.update_interval)
+                    continue
+
+                consecutive_failures = 0
+                server_was_up = True
+
+            # Attempt to send pending notification if internet is restored
+            if pending_notification and (current_time - last_notification_time) >= config.notification_cooldown:
+                logger.debug(f"Retrying pending notification: {pending_notification}")
+                if trigger_apps_script(config, logger, pending_notification):
+                    logger.debug("Pending notification sent successfully")
+                    last_notification_time = current_time
+                    pending_notification = None
+                else:
+                    logger.debug("Failed to send pending notification")
 
             monitors_data = api.get_all_monitors()
             if monitors_data is None:
@@ -451,7 +480,7 @@ def main() -> None:
                     error_msg = f"Shinobi server data fetch failed after {config.max_consecutive_failures} attempts. Exiting script."
                     logger.error(error_msg)
                     print(f"Error: {error_msg}")
-                    trigger_apps_script(config, logger, error_msg)  # Added notification
+                    trigger_apps_script(config, logger, error_msg)
                     sys.exit(1)
                 time.sleep(config.update_interval)
                 continue
@@ -477,17 +506,27 @@ def main() -> None:
         except requests.RequestException as e:
             logger.error(f"Network error while fetching data: {str(e)}")
             consecutive_failures += 1
-            current_time = time.time()  # Added for notification
+            current_time = time.time()
+            logger.debug(f"Checking notification condition: server_was_up={server_was_up}, time_since_last_notification={current_time - last_notification_time}, cooldown={config.notification_cooldown}")
             if server_was_up or (current_time - last_notification_time) >= config.notification_cooldown:
                 message = f"Shinobi server at {config.shinobi_host}:{config.shinobi_port} is down (Network error: {str(e)}). Please check the server."
+                logger.debug(f"Attempting to trigger Apps Script with message: {message}")
                 if trigger_apps_script(config, logger, message):
+                    logger.debug("Apps Script triggered successfully")
                     last_notification_time = current_time
+                    pending_notification = None  # Clear pending notification
+                else:
+                    logger.debug("Failed to trigger Apps Script")
+                    pending_notification = message  # Store message for retry
                 server_was_up = False
             if consecutive_failures >= config.max_consecutive_failures:
                 error_msg = f"Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting script."
                 logger.error(error_msg)
                 print(f"Error: {error_msg}")
-                trigger_apps_script(config, logger, error_msg)  # Added notification
+                if trigger_apps_script(config, logger, error_msg):
+                    pending_notification = None
+                else:
+                    pending_notification = error_msg
                 sys.exit(1)
             time.sleep(config.update_interval)
         except Exception as e:
