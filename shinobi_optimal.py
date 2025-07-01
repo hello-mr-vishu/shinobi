@@ -397,7 +397,8 @@ def main() -> None:
 
     logger = setup_logging(config.timezone)
     logger.info("Shinobi Monitor Script started")
-    logger.info(f"Configuration loaded: {config.model_dump(exclude={'api_key', 'credentials_file'})}")
+    # logger.info(f"Configuration loaded: {config.model_dump(exclude={'api_key', 'credentials_file'})}")
+    logger.info(f"Configuration loaded: {config.dict(exclude={'api_key', 'credentials_file'})}")
 
     api = ShinobiAPI(config, logger)
     sheets_client = GoogleSheetsClient(config, logger)
@@ -409,7 +410,7 @@ def main() -> None:
     def signal_handler(sig: int, frame: Optional[object]) -> None:
         nonlocal shutdown
         logger.info("Shutdown signal received")
-        shutdown = True
+        shutdown = Truelogger.info(f"Configuration loaded: {config.dict(exclude={'api_key', 'credentials_file'})}")
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
