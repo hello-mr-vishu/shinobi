@@ -4,6 +4,7 @@
 The Shinobi Monitoring System is designed to monitor the operational status of Shinobi surveillance cameras, log their metrics to a Google Sheet, save data locally as JSON files, and send notifications via email when issues are detected. The system consists of a Python script (`shinobi_monitor.py`) that fetches camera status data from a Shinobi server and two Google Apps Scripts (`code.gs` and `ShinobiServerDownNotifier`) for threshold-based and server downtime notifications.
 
 ---
+<img src="docs/1.png" alt="shinobi" width="500">
 
 ## Components
 
