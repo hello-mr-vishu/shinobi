@@ -4,14 +4,14 @@
 The Shinobi Monitoring System is designed to monitor the operational status of Shinobi surveillance cameras, log their metrics to a Google Sheet, save data locally as JSON files, and send notifications via email when issues are detected. The system consists of a Python script (`shinobi.py`) that fetches camera status data from a Shinobi server and two Google Apps Scripts (`code.gs` and `ShinobiServerDownNotifier`) for threshold-based and server downtime notifications.
 
 ---
-<img src="docs/1.png" alt="shinobi" width="500">
+<img src="docs/1.png" alt="shinobi" height="700" width="600">
 
 ## Components
 
 ### 1. Python Script (`shinobi.py`)
 This script monitors Shinobi cameras, logs their status, and updates a Google Sheet with metrics. It also saves data locally and triggers notifications via an Apps Script endpoint when the server is down.
-<img src="docs/3.png" alt="shinobi" height="600" width="600">
-<img src="docs/2.png" alt="shinobi" height="600" width="600">
+<img src="docs/3.png" alt="shinobi" height="700" width="600">
+<img src="docs/2.png" alt="shinobi" height="700" width="600">
 
 #### Features
 - **Configuration**: Loads settings from a `.env` file using Pydantic for validation.
@@ -22,6 +22,8 @@ This script monitors Shinobi cameras, logs their status, and updates a Google Sh
 - **Notifications**: Sends alerts to a Google Apps Script endpoint for server downtime.
 - **Error Handling**: Uses retries, exponential backoff, and graceful shutdown on signals.
 
+<img src="docs/6.png" alt="shinobi" height="700" width="600">
+<img src="docs/7.png" alt="shinobi" height="700" width="600">
 #### Configuration
 The script uses a `.env` file with the following variables:
 ```
@@ -42,7 +44,7 @@ LOG_RETENTION_DAYS=7
 APPS_SCRIPT_URL=https://script.google.com/macros/s/AKfycbzxCCbbZDYoycEw2hnncetkZwRzsPv_vqWx94DoZO72jmslAqVmqJY40VymTlHwsxEf/exec
 NOTIFICATION_COOLDOWN=600
 ```
-
+<img src="docs/8.png" alt="shinobi" height="700" width="600">
 #### Dependencies
 The script requires the following Python packages, listed in `requirements.txt`:
 ```
@@ -69,6 +71,8 @@ The script tracks:
 - **Percentage Recording**: Percentage of cameras recording.
 - **Threshold Met**: "Yes" if ≥75% of cameras are recording, else "No".
 
+  <img src="docs/4.png" alt="shinobi" height="700" width="600">
+<img src="docs/11.png" alt="shinobi" height="700" width="600">
 #### Error Handling
 - Retries API calls up to 3 times with exponential backoff.
 - Exits after 10 consecutive failures.
