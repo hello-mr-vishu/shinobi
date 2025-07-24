@@ -1,22 +1,24 @@
 {
   "name": "shinobi",
   "version": "1.0.0",
-  "description": "The Shinobi Monitoring System is designed to monitor the operational status of Shinobi surveillance cameras, log their metrics to a Google Sheet, save data locally as JSON files, and send notifications via email when issues are detected. The system consists of a Python script (`shinobi_monitor.py`) that fetches camera status data from a Shinobi server and two Google Apps Scripts (`code.gs` and `ShinobiServerDownNotifier`) for threshold-based and server downtime notifications.",
-  "main": "whatsapp.js",
-  "directories": {
-    "doc": "docs"
-  },
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "body-parser": "^2.2.0",
     "express": "^5.1.0",
     "puppeteer": "^24.11.2",
     "qrcode-terminal": "^0.12.0",
-    "whatsapp-web.js": "^1.23.0"
+    "whatsapp-web.js": "^1.31.0"
+  },
+  "overrides": {
+    "whatsapp-web.js": {
+      "puppeteer": "^24.11.2",
+      "puppeteer-core": "^24.11.2",
+      "rimraf": "^5.0.0",
+      "unzipper": {
+        "rimraf": "^5.0.0",
+        "fstream": {
+          "rimraf": "^5.0.0"
+        }
+      }
+    }
   }
 }

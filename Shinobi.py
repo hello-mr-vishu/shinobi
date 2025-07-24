@@ -1,24 +1,25 @@
-import os
-import sys
-import json
-import time
-import signal
-import logging
-import requests
-from datetime import datetime
-from typing import Optional, List, Dict, Any
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-import gspread
-from gspread import Client, Worksheet
-from oauth2client.service_account import ServiceAccountCredentials
-from pydantic import BaseModel, ValidationError
-from dotenv import load_dotenv
-import pytz
-from logging.handlers import RotatingFileHandler
-from tenacity import retry, stop_after_attempt, wait_exponential
+# Import required libraries for the Shinobi Monitoring System
+import os  # For file and directory operations (e.g., checking .env file, creating output directory)
+import sys  # For system-specific functions (e.g., exiting on import errors)
+import json  # For handling JSON data (e.g., parsing API responses, saving metrics)
+import time  # For timing operations (e.g., sleep intervals, timestamps)
+import signal  # For handling shutdown signals (e.g., Ctrl+C, SIGTERM)
+import logging  # For logging script activity to console and file
+import requests  # For making HTTP requests to Shinobi API
+from datetime import datetime  # For generating timestamps in local timezone
+from typing import Optional, List, Dict, Any  # For type hints to improve code clarity
+from requests.adapters import HTTPAdapter  # For configuring retry behavior in HTTP requests
+from urllib3.util.retry import Retry  # For retry logic on HTTP requests
+import gspread  # For interacting with Google Sheets API
+from gspread import Client, Worksheet  # For specific Google Sheets client and worksheet types
+from oauth2client.service_account import ServiceAccountCredentials  # For Google Sheets authentication
+from pydantic import BaseModel, ValidationError  # For structured configuration validation
+from dotenv import load_dotenv  # For loading environment variables from .env file
+import pytz  # For handling timezone conversions (e.g., Asia/Kolkata)
+from logging.handlers import RotatingFileHandler  # For log rotation to manage log file size
+from tenacity import retry, stop_after_attempt, wait_exponential  # For retrying failed operations with exponential backoff
 
-# Check dependencies
+# Check for required dependencies to ensure script runs correctly
 try:
     import requests
     import gspread
@@ -28,37 +29,36 @@ try:
     import pytz
 except ImportError as e:
     print(f"Error: Missing required package: {e.name}. Install with 'pip install requests python-dotenv gspread oauth2client pydantic pytz tenacity'")
-    sys.exit(1)
+    sys.exit(1)  # Exit script if dependencies are missing
 
-# Configuration model
+# Define configuration model using Pydantic for type safety and validation
 class Config(BaseModel):
-    shinobi_host: str
-    shinobi_port: int
-    api_key: str
-    group_key: str
-    monitor_ids: List[str]
-    sheet_id: str
-    credentials_file: str
-    scopes: List[str]
-    output_dir: str
-    update_interval: float
-    max_retries: int
-    retry_backoff_factor: float
-    timezone: str
-    max_consecutive_failures: int
-    log_retention_days: int
-    apps_script_url: str
-    notification_cooldown: int
-    whatsapp_api_url: str  # Added for WhatsApp notifications
-    whatsapp_number: str  # Added for WhatsApp notifications
+    shinobi_host: str  # Shinobi server hostname (e.g., localhost)
+    shinobi_port: int  # Shinobi server port (e.g., 8080)
+    api_key: str  # Shinobi API key for authentication
+    group_key: str  # Shinobi group key to filter monitors
+    monitor_ids: List[str]  # List of monitor IDs to track
+    sheet_id: str  # Google Sheet ID for storing metrics
+    credentials_file: str  # Path to Google Sheets service account credentials JSON
+    scopes: List[str]  # Google API scopes for authentication
+    output_dir: str  # Directory to save JSON metric files
+    update_interval: float  # Interval (seconds) between metric updates
+    max_retries: int  # Maximum retries for API requests
+    retry_backoff_factor: float  # Backoff factor for retry delays
+    timezone: str  # Timezone for timestamps (e.g., Asia/Kolkata)
+    max_consecutive_failures: int  # Max consecutive API failures before exiting
+    log_retention_days: int  # Days to retain JSON metric files
+    apps_script_url: str  # URL for Apps Script to send server-down notifications
+    notification_cooldown: int  # Cooldown (seconds) between server-down notifications
 
-# Structured log formatter
+# Custom log formatter to output logs in JSON format for structured logging
 class JsonFormatter(logging.Formatter):
     def __init__(self, timezone: str):
         super().__init__()
-        self.tz = pytz.timezone(timezone)
+        self.tz = pytz.timezone(timezone)  # Set timezone for log timestamps
 
     def format(self, record):
+        # Format log record as JSON with timestamp, level, message, module, and line number
         log_record = {
             "timestamp": datetime.now(self.tz).isoformat(),
             "level": record.levelname,
@@ -68,24 +68,24 @@ class JsonFormatter(logging.Formatter):
         }
         return json.dumps(log_record)
 
-# Initialize logger
+# Set up logging to console (INFO and above) and file (DEBUG and above) with rotation
 def setup_logging(timezone: str) -> logging.Logger:
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.DEBUG)
-    logger.handlers.clear()
+    logger.handlers.clear()  # Clear any existing handlers to avoid duplicates
     
-    # Console handler: Only INFO and above
+    # Console handler: Outputs INFO and higher to stdout
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(JsonFormatter(timezone))
     logger.addHandler(console_handler)
     
-    # File handler: Rotate logs, max 5 MB, keep 5 backups
+    # File handler: Outputs DEBUG and higher to rotating log file (5 MB, 5 backups)
     try:
         file_handler = RotatingFileHandler(
             "shinobi_monitor.log",
-            maxBytes=5*1024*1024,  # 5 MB
-            backupCount=5
+            maxBytes=5*1024*1024,  # 5 MB per file
+            backupCount=5  # Keep 5 backup files
         )
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(JsonFormatter(timezone))
@@ -93,19 +93,21 @@ def setup_logging(timezone: str) -> logging.Logger:
     except Exception as e:
         print(f"Warning: Failed to set up file logging: {e}")
     
-    logger.propagate = False
+    logger.propagate = False  # Prevent logs from propagating to parent loggers
     return logger
 
+# Load configuration from .env file and validate using Pydantic
 def load_config(env_path: str = ".env") -> Config:
-    logger = setup_logging("Asia/Kolkata")
+    logger = setup_logging("Asia/Kolkata")  # Initialize logger with default timezone
     logger.info("Loading configuration from .env")
     if not os.path.exists(env_path):
         logger.error(f".env file not found at {env_path}")
         raise FileNotFoundError(f".env file not found at {env_path}")
 
-    load_dotenv(env_path)
+    load_dotenv(env_path)  # Load environment variables from .env
     
     try:
+        # Validate required environment variables
         shinobi_port = os.getenv("SHINOBI_PORT")
         if shinobi_port is None:
             raise ValueError("Missing required environment variable: SHINOBI_PORT")
@@ -130,13 +132,13 @@ def load_config(env_path: str = ".env") -> Config:
         if retry_backoff_factor is None:
             raise ValueError("Missing required environment variable: RETRY_BACKOFF_FACTOR")
         
+        # Set default values for optional variables
         max_consecutive_failures = os.getenv("MAX_CONSECUTIVE_FAILURES", "5")
         log_retention_days = os.getenv("LOG_RETENTION_DAYS", "7")
-        apps_script_url = os.getenv("APPS_SCRIPT_URL", "")
-        notification_cooldown = os.getenv("NOTIFICATION_COOLDOWN", "3600")
-        whatsapp_api_url = os.getenv("WHATSAPP_API_URL", "")  # Added, allow empty
-        whatsapp_number = os.getenv("WHATSAPP_NUMBER") or ""  # Added
+        apps_script_url = os.getenv("APPS_SCRIPT_URL", "")  # Allow empty URL
+        notification_cooldown = os.getenv("NOTIFICATION_COOLDOWN", "3600")  # Default 1 hour
 
+        # Create configuration dictionary
         env_config = {
             "shinobi_host": os.getenv("SHINOBI_HOST") or "",
             "shinobi_port": int(shinobi_port),
@@ -153,17 +155,17 @@ def load_config(env_path: str = ".env") -> Config:
             "timezone": os.getenv("TIMEZONE", "Asia/Kolkata"),
             "max_consecutive_failures": int(max_consecutive_failures),
             "log_retention_days": int(log_retention_days),
-            "apps_script_url": apps_script_url,
-            "notification_cooldown": int(notification_cooldown),
-            "whatsapp_api_url": whatsapp_api_url,  # Added
-            "whatsapp_number": whatsapp_number  # Added
+            "apps_script_url": apps_script_url,  # URL for server-down notifications
+            "notification_cooldown": int(notification_cooldown)  # Cooldown for notifications
         }
         
+        # Validate that required fields are not empty (except apps_script_url)
         for key, value in env_config.items():
-            if isinstance(value, str) and not value and key not in ["apps_script_url", "whatsapp_api_url"]:
+            if isinstance(value, str) and not value and key not in ["apps_script_url"]:
                 logger.error(f"Missing required environment variable: {key.upper()}")
                 raise ValueError(f"Missing required environment variable: {key.upper()}")
 
+        # Validate timezone
         try:
             pytz.timezone(env_config["timezone"])
         except pytz.exceptions.UnknownTimeZoneError:
@@ -171,62 +173,48 @@ def load_config(env_path: str = ".env") -> Config:
             raise ValueError(f"Invalid timezone: {env_config['timezone']}")
 
         logger.info("Configuration loaded successfully")
-        return Config(**env_config)
+        return Config(**env_config)  # Return validated Config object
     except (ValidationError, ValueError, json.JSONDecodeError) as e:
         logger.error(f"Configuration error: {str(e)}")
         raise
 
-# Trigger Apps Script
+# Trigger Google Apps Script for server-down notifications
 def trigger_apps_script(config: Config, logger: logging.Logger, message: str) -> bool:
     if not config.apps_script_url:
         logger.warning("Apps Script URL not configured; skipping notification")
-        return False
+        return False  # Skip if no URL is provided
     
     try:
-        payload = {"message": message}
+        payload = {"message": message}  # Prepare notification payload
         response = requests.post(config.apps_script_url, json=payload, timeout=10)
-        response.raise_for_status()
+        response.raise_for_status()  # Raise exception for HTTP errors
         logger.info(f"Successfully triggered Apps Script: {response.text}")
         return True
     except requests.RequestException as e:
         logger.error(f"Failed to trigger Apps Script: {str(e)}")
         return False
 
-# Added: Trigger WhatsApp notification
-def trigger_whatsapp_notification(config: Config, logger: logging.Logger, message: str) -> bool:
-    if not config.whatsapp_api_url or not config.whatsapp_number:
-        logger.warning("WhatsApp API URL or number not configured; skipping notification")
-        return False
-    
-    try:
-        payload = {"number": config.whatsapp_number, "message": message}
-        response = requests.post(config.whatsapp_api_url, json=payload, timeout=10)
-        response.raise_for_status()
-        logger.info(f"Successfully sent WhatsApp notification: {response.text}")
-        return True
-    except requests.RequestException as e:
-        logger.error(f"Failed to send WhatsApp notification: {str(e)}")
-        return False
-
+# Class to interact with Shinobi API
 class ShinobiAPI:
     def __init__(self, config: Config, logger: logging.Logger):
         self.config = config
         self.logger = logger
-        self.base_url = f"http://{config.shinobi_host}:{config.shinobi_port}/{config.api_key}"
-        self.session = self._create_session()
+        self.base_url = f"http://{config.shinobi_host}:{config.shinobi_port}/{config.api_key}"  # Base URL for API requests
+        self.session = self._create_session()  # Initialize HTTP session with retries
 
     def _create_session(self) -> requests.Session:
         session = requests.Session()
         retries = Retry(
             total=self.config.max_retries,
             backoff_factor=self.config.retry_backoff_factor,
-            status_forcelist=[429, 500, 502, 503, 504]
+            status_forcelist=[429, 500, 502, 503, 504]  # Retry on specific HTTP errors
         )
         adapter = HTTPAdapter(max_retries=retries)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         return session
 
+    # Fetch all monitors with retry logic
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     def get_all_monitors(self) -> Optional[List[Dict[str, Any]]]:
         endpoint = f"monitor/{self.config.group_key}"
@@ -237,11 +225,12 @@ class ShinobiAPI:
             if isinstance(data, dict) and not data.get("ok"):
                 self.logger.error(f"API error: {data.get('msg', 'Unknown error')}")
                 return None
-            return data
+            return data  # Return list of monitor data
         except requests.RequestException as e:
             self.logger.error(f"Request error: {str(e)}")
             return None
 
+    # Check Shinobi server health
     def health_check(self) -> str:
         endpoint = f"monitor/{self.config.group_key}"
         try:
@@ -263,14 +252,16 @@ class ShinobiAPI:
             self.logger.warning(f"Shinobi server health check failed: {str(e)}")
             return "ERROR"
 
+# Class to interact with Google Sheets
 class GoogleSheetsClient:
     def __init__(self, config: Config, logger: logging.Logger):
         self.config = config
         self.logger = logger
         self.client: Optional[Client] = None
         self.sheet: Optional[Worksheet] = None
-        self._initialize_client()
+        self._initialize_client()  # Initialize client on creation
 
+    # Initialize Google Sheets client with retry logic
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     def _initialize_client(self) -> None:
         try:
@@ -281,21 +272,22 @@ class GoogleSheetsClient:
             creds = ServiceAccountCredentials.from_json_keyfile_name(
                 self.config.credentials_file, self.config.scopes
             )
-            self.client = gspread.authorize(creds) 
-            self.sheet = self.client.open_by_key(self.config.sheet_id).sheet1
+            self.client = gspread.authorize(creds)  # Authenticate with Google Sheets
+            self.sheet = self.client.open_by_key(self.config.sheet_id).sheet1  # Open first sheet
         except Exception as e:
             self.logger.error(f"Failed to initialize Google Sheets client: {str(e)}")
             self.client = None
             self.sheet = None
             raise
 
+    # Append a row to Google Sheet with retries
     def append_row(self, row: List[Any]) -> bool:
         if self.sheet is None:
             self.logger.error("Google Sheets client not initialized")
             return False
         for attempt in range(self.config.max_retries):
             try:
-                self.sheet.append_row(row) 
+                self.sheet.append_row(row)  # Append row to sheet
                 return True
             except Exception as e:
                 self.logger.warning(f"Failed to append row on attempt {attempt + 1}: {str(e)}")
@@ -303,15 +295,16 @@ class GoogleSheetsClient:
         self.logger.error("Max retries reached for appending to Google Sheet")
         return False
 
+# Process monitor data and calculate metrics
 def process_monitors(monitors_data: Optional[List[Dict[str, Any]]], config: Config, logger: logging.Logger) -> Dict[str, Any]:
     if not monitors_data or not isinstance(monitors_data, list):
         logger.error("Invalid or no monitor data received")
-        return {"monitors": [], "metrics": {}}
+        return {"monitors": [], "metrics": {}}  # Return empty data on failure
 
     logger.debug(f"Processing monitors: {monitors_data}")
     logger.debug(f"Configured monitor IDs: {config.monitor_ids}")
 
-    seen_ids = set()
+    seen_ids = set()  # Track seen monitor IDs to avoid duplicates
     monitor_statuses = []
     for monitor in monitors_data:
         monitor_id = monitor.get("mid")
@@ -330,6 +323,7 @@ def process_monitors(monitors_data: Optional[List[Dict[str, Any]]], config: Conf
             monitor_statuses.append(status)
             logger.debug(f"Monitor status: {status}")
             if not operational:
+                # Log non-operational monitors to file (DEBUG level)
                 logger.debug(json.dumps({
                     "monitor_id": status["id"],
                     "name": status["name"],
@@ -340,10 +334,12 @@ def process_monitors(monitors_data: Optional[List[Dict[str, Any]]], config: Conf
                     "message": "Monitor not operational"
                 }))
 
+    # Identify missing monitors
     missing_monitors = [mid for mid in config.monitor_ids if mid not in seen_ids]
     if missing_monitors:
         logger.warning(f"Missing monitors: {missing_monitors}")
 
+    # Calculate metrics
     total_cameras = len(config.monitor_ids)
     recording_count = sum(1 for status in monitor_statuses if status["operational"])
     percentage_recording = 0.0
@@ -366,15 +362,16 @@ def process_monitors(monitors_data: Optional[List[Dict[str, Any]]], config: Conf
     logger.debug(f"Processed metrics: {metrics}")
     return {"monitors": monitor_statuses, "metrics": metrics, "missing_monitors": missing_monitors}
 
+# Save metrics to JSON file and clean up old files
 def save_metrics(metrics: Dict[str, Any], config: Config, logger: logging.Logger) -> str:
     try:
-        os.makedirs(config.output_dir, exist_ok=True)
+        os.makedirs(config.output_dir, exist_ok=True)  # Create output directory if it doesn't exist
         timestamp = datetime.now(pytz.timezone(config.timezone)).strftime("%Y%m%d_%H%M%S")
         output_path = os.path.normpath(os.path.join(config.output_dir, f"monitor_data_{timestamp}.json"))
         with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(metrics, f, indent=2)
+            json.dump(metrics, f, indent=2)  # Save metrics as JSON
         
-        # Clean up old log files
+        # Clean up JSON files older than log_retention_days
         cutoff_time = time.time() - (config.log_retention_days * 86400)
         for filename in os.listdir(config.output_dir):
             if filename.startswith("monitor_data_") and filename.endswith(".json"):
@@ -391,6 +388,7 @@ def save_metrics(metrics: Dict[str, Any], config: Config, logger: logging.Logger
         logger.error(f"Failed to save metrics to {output_path}: {str(e)}")
         return ""
 
+# Print metrics and monitor statuses to console
 def print_metrics(data: Dict[str, Any]) -> None:
     metrics = data["metrics"]
     print("\nMonitor Metrics:")
@@ -407,10 +405,11 @@ def print_metrics(data: Dict[str, Any]) -> None:
     if data["missing_monitors"]:
         print(f"\nWarning: Missing monitors: {data['missing_monitors']}")
 
+# Main loop to monitor Shinobi server and update Google Sheet
 def main() -> None:
     print("Starting Shinobi Monitor Script...")
     try:
-        config = load_config()
+        config = load_config()  # Load and validate configuration
     except Exception as e:
         logging.getLogger(__name__).error(f"Failed to load configuration: {str(e)}")
         print(f"Error: Failed to load configuration: {e}")
@@ -418,16 +417,16 @@ def main() -> None:
 
     logger = setup_logging(config.timezone)
     logger.info("Shinobi Monitor Script started")
-    logger.info(f"Configuration loaded: {config.dict(exclude={'api_key', 'credentials_file'})}")
+    logger.info(f"Configuration loaded: {config.dict(exclude={'api_key', 'credentials_file'})}")  # Log config (excluding sensitive fields)
 
-    api = ShinobiAPI(config, logger)
-    sheets_client = GoogleSheetsClient(config, logger)
+    api = ShinobiAPI(config, logger)  # Initialize Shinobi API client
+    sheets_client = GoogleSheetsClient(config, logger)  # Initialize Google Sheets client
     shutdown = False
     consecutive_failures = 0
-    last_notification_time = 0.0
-    server_was_up = True
-    threshold_was_met = True  # Added for threshold notifications
+    last_notification_time = 0.0  # Track time of last server-down notification
+    server_was_up = True  # Track if server was previously up
 
+    # Handle shutdown signals (Ctrl+C, SIGTERM)
     def signal_handler(sig: int, frame: Optional[object]) -> None:
         nonlocal shutdown
         logger.info("Shutdown signal received")
@@ -439,7 +438,7 @@ def main() -> None:
     while not shutdown:
         try:
             start_time = time.time()
-            server_status = api.health_check()
+            server_status = api.health_check()  # Check Shinobi server status
             print(f"Shinobi Server Status: {server_status}")
             logger.info(f"Shinobi Server Status: {server_status}")
 
@@ -449,25 +448,23 @@ def main() -> None:
                 # Send notification on first failure or after cooldown
                 if server_was_up or (current_time - last_notification_time) >= config.notification_cooldown:
                     message = f"Shinobi server at {config.shinobi_host}:{config.shinobi_port} is down (Status: {server_status}). Please check the server."
-                    trigger_apps_script(config, logger, message)
-                    trigger_whatsapp_notification(config, logger, message)
-                    last_notification_time = current_time
-                server_was_up = False
+                    if trigger_apps_script(config, logger, message):
+                        last_notification_time = current_time
+                    server_was_up = False
                 logger.warning(f"Shinobi server check failed (attempt {consecutive_failures}/{config.max_consecutive_failures})")
                 if consecutive_failures >= config.max_consecutive_failures:
                     error_msg = f"Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting script."
                     logger.error(error_msg)
                     print(f"Error: {error_msg}")
-                    trigger_apps_script(config, logger, error_msg)
-                    trigger_whatsapp_notification(config, logger, error_msg)
+                    trigger_apps_script(config, logger, error_msg)  # Notify on script exit
                     sys.exit(1)
                 time.sleep(config.update_interval)
                 continue
 
             consecutive_failures = 0
-            server_was_up = True
+            server_was_up = True  # Reset server status
 
-            monitors_data = api.get_all_monitors()
+            monitors_data = api.get_all_monitors()  # Fetch monitor data
             if monitors_data is None:
                 logger.error("Failed to fetch monitor data from Shinobi API")
                 consecutive_failures += 1
@@ -476,15 +473,14 @@ def main() -> None:
                     logger.error(error_msg)
                     print(f"Error: {error_msg}")
                     trigger_apps_script(config, logger, error_msg)
-                    trigger_whatsapp_notification(config, logger, error_msg)
                     sys.exit(1)
                 time.sleep(config.update_interval)
                 continue
 
-            processed_data = process_monitors(monitors_data, config, logger)
+            processed_data = process_monitors(monitors_data, config, logger)  # Process monitor data
             
             if processed_data["metrics"]:
-                save_metrics(processed_data, config, logger)
+                save_metrics(processed_data, config, logger)  # Save metrics to JSON file
                 if not sheets_client.append_row([
                     processed_data["metrics"]["date"],
                     processed_data["metrics"]["time"],
@@ -494,20 +490,10 @@ def main() -> None:
                     processed_data["metrics"]["threshold_met"]
                 ]):
                     logger.error("Failed to append row to Google Sheets")
-                print_metrics(processed_data)
-                
-                # Send notification if threshold not met
-                if processed_data["metrics"]["threshold_met"] == "No" and (threshold_was_met or (current_time - last_notification_time) >= config.notification_cooldown):
-                    message = f"Camera recording threshold not met: {processed_data['metrics']['percentage_recording']}% (Recording: {processed_data['metrics']['recording']}/{processed_data['metrics']['total_cameras']})."
-                    trigger_apps_script(config, logger, message)
-                    trigger_whatsapp_notification(config, logger, message)
-                    last_notification_time = current_time
-                    threshold_was_met = False
-                elif processed_data["metrics"]["threshold_met"] == "Yes":
-                    threshold_was_met = True
+                print_metrics(processed_data)  # Print metrics to console
             
             elapsed_time = time.time() - start_time
-            sleep_time = max(config.update_interval - elapsed_time, 0)
+            sleep_time = max(config.update_interval - elapsed_time, 0)  # Adjust sleep to maintain interval
             time.sleep(sleep_time)
         except requests.RequestException as e:
             logger.error(f"Network error while fetching data: {str(e)}")
@@ -515,16 +501,14 @@ def main() -> None:
             current_time = time.time()
             if server_was_up or (current_time - last_notification_time) >= config.notification_cooldown:
                 message = f"Shinobi server at {config.shinobi_host}:{config.shinobi_port} is down (Network error: {str(e)}). Please check the server."
-                trigger_apps_script(config, logger, message)
-                trigger_whatsapp_notification(config, logger, message)
-                last_notification_time = current_time
+                if trigger_apps_script(config, logger, message):
+                    last_notification_time = current_time
                 server_was_up = False
             if consecutive_failures >= config.max_consecutive_failures:
                 error_msg = f"Shinobi server unreachable after {config.max_consecutive_failures} attempts. Exiting script."
                 logger.error(error_msg)
                 print(f"Error: {error_msg}")
                 trigger_apps_script(config, logger, error_msg)
-                trigger_whatsapp_notification(config, logger, error_msg)
                 sys.exit(1)
             time.sleep(config.update_interval)
         except Exception as e:
@@ -532,4 +516,4 @@ def main() -> None:
             time.sleep(config.update_interval)
 
 if __name__ == "__main__":
-    main()
+    main()  # Run the main monitoring loop

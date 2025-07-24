@@ -1,42 +1,23 @@
-const qrcode = require('qrcode-terminal');
+// ========== WhatsApp Runtime Client Setup ==========
 const { Client } = require('whatsapp-web.js');
-const express = require('express');
-const bodyParser = require('body-parser');
+const qrcode = require('qrcode-terminal');
 
-const app = express();
-app.use(bodyParser.json());
+const waClient = new Client();
 
-const client = new Client();
-
-client.on('qr', (qr) => {
-  console.log('Scan the QR code below to authenticate:');
+waClient.on('qr', (qr) => {
   qrcode.generate(qr, { small: true });
+  console.log("📲 Scan this QR code with WhatsApp to activate the session.");
 });
 
-client.on('ready', () => {
-  console.log('WhatsApp client is ready!');
+waClient.on('ready', () => {
+  console.log('✅ WhatsApp client is ready and connected.');
 });
 
-client.on('error', (error) => {
-  console.error('WhatsApp client error:', error);
-});
+waClient.initialize();
 
-app.post('/send-notification', async (req, res) => {
-  const { number, message } = req.body;
-  if (!number || !message) {
-    return res.status(400).json({ error: 'Missing number or message' });
-  }
-  try {
-    await client.sendMessage(`${number}@c.us`, message);
-    res.status(200).json({ success: 'Message sent' });
-  } catch (error) {
-    console.error('Error sending WhatsApp message:', error);
-    res.status(500).json({ error: 'Failed to send message' });
-  }
-});
+async function sendWhatsAppAlert(message) {
+  const number = '8328618110'; // Replace with your WhatsApp number
+  const chatId = `${number}@c.us`;
 
-client.initialize();
-
-app.listen(3000, () => {
-  console.log('Express server running on port 3000');
-});
+  
+}
